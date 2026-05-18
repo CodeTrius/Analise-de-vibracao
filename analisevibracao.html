@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Análise de Vibração e PDS em Sistemas Industriais</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.css" />
+    <style>
+      :root { color-scheme: dark; background: #0e1117; }
+      html, body { margin: 0; min-height: 100%; background: #0e1117; color: #f8fafc; font-family: Inter, Segoe UI, Roboto, Arial, sans-serif; }
+      #root { min-height: 100vh; }
+      .loading, .error { align-items: center; display: flex; flex-direction: column; gap: 12px; justify-content: center; min-height: 100vh; padding: 24px; text-align: center; }
+      .loading strong { color: #4ade80; font-size: 21px; letter-spacing: 0; }
+      .loading span, .error span { color: #94a3b8; font-size: 14px; line-height: 1.5; max-width: 720px; }
+      .error strong { color: #f87171; }
+      code { background: #111827; border: 1px solid #334155; border-radius: 6px; color: #e2e8f0; padding: 2px 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="loading">
+        <strong>Inicializando módulo de análise de vibração...</strong>
+        <span>Aquisição multieixo, ADC, filtragem digital, FFT, envelope e análise por ordem.</span>
+      </div>
+    </div>
+    <script>
+(function () {
+  const FIELDS = ["tempo", "ax", "ay", "az", "gx", "gy", "gz", "mx", "my", "mz"];
+  const FIELD_LABELS = {
+    tempo: "Tempo",
+    ax: "Ax",
+    ay: "Ay",
+    az: "Az",
+    gx: "Gx",
+    gy: "Gy",
+    gz: "Gz",
+    mx: "Mx",
+    my: "My",
+    mz: "Mz",
+  };
+  const KEY_ALIASES = {
+    t: "tempo",
+    time: "tempo",
+    tempo: "tempo",
+    timestamp: "tempo",
+    millis: "tempo",
+    ms: "tempo",
+    ax: "ax",
+    accx: "ax",
+    accelx: "ax",
+    acc_x: "ax",
+    ay: "ay",
+    accy: "ay",
+    accely: "ay",
+    acc_y: "ay",
+    az: "az",
+    accz: "az",
+    accelz: "az",
+    acc_z: "az",
+    gx: "gx",
+    gyrox: "gx",
+    gyro_x: "gx",
+    gy: "gy",
+    gyroy: "gy",
+    gyro_y: "gy",
+    gz: "gz",
+    gyroz: "gz",
+    gyro_z: "gz",
+    mx: "mx",
+    magx: "mx",
+    mag_x: "mx",
+    my: "my",
+    magy: "my",
+    mag_y: "my",
+    mz: "mz",
+    magz: "mz",
+    mag_z: "mz",
+  };
+
+  const state = {
+    port: null,
+    reader: null,
+    decoderDone: null,
+    inputDone: null,
+    keepReading: false,
+    rawLines: [],
+    rows: [],
+    samples: [],
+    latestColumnCount: 10,
+    mapping: {
+      tempo: 0,
+      ax: 1,
+      ay: 2,
+      az: 3,
+      gx: 4,
+      gy: 5,
+      gz: 6,
+      mx: 7,
+      my: 8,
+      mz: 9,
+    },
+  };
+
+  function $(id) {
+    return document.getElementById(id);
+  }
+
+  function injectStyles() {
+    const style = document.createElement("style");
+    style.textContent = `
+      .serial-toggle {
+        position: fixed;
+        z-index: 2147483000;
+        right: 18px;
+        bottom: 18px;
+        border: 1px solid #2563eb;
+        border-radius: 999px;
+        background: #1d4ed8;
+        color: #fff;
+        cursor: pointer;
+        font: 700 13px/1 Inter, Segoe UI, Arial, sans-serif;
+        padding: 12px 16px;
+        box-shadow: 0 14px 34px rgba(0,0,0,.38);
+      }
+      .serial-panel {
+        position: fixed;
+        z-index: 2147482999;
+        right: 18px;
+        bottom: 70px;
+        width: min(560px, calc(100vw - 36px));
+        max-height: min(760px, calc(100vh - 96px));
+        overflow: auto;
+        display: none;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        background: #0f172a;
+        color: #e5e7eb;
+        box-shadow: 0 24px 60px rgba(0,0,0,.52);
+        font: 13px/1.35 Inter, Segoe UI, Arial, sans-serif;
+      }
+      .serial-panel.open { display: block; }
+      .serial-head {
+        align-items: center;
+        border-bottom: 1px solid #1e293b;
+        display: flex;
+        justify-content: space-between;
+        padding: 12px 14px;
+        position: sticky;
+        top: 0;
+        background: #0f172a;
+      }
+      .serial-head strong { color: #f8fafc; font-size: 14px; }
+      .serial-close {
+        background: transparent;
+        border: 0;
+        color: #94a3b8;
+        cursor: pointer;
+        font-size: 22px;
+        line-height: 1;
+      }
+      .serial-body { padding: 14px; }
+      .serial-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .serial-field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+      .serial-field label, .serial-map label { color: #cbd5e1; font-size: 12px; }
+      .serial-field input, .serial-field select, .serial-map select {
+        background: #111827;
+        border: 1px solid #334155;
+        border-radius: 7px;
+        color: #f8fafc;
+        font: inherit;
+        min-height: 34px;
+        padding: 7px 8px;
+      }
+      .serial-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+      .serial-btn {
+        background: #1d4ed8;
+        border: 1px solid #2563eb;
+        border-radius: 8px;
+        color: white;
+        cursor: pointer;
+        font: 700 12px/1 Inter, Segoe UI, Arial, sans-serif;
+        padding: 9px 11px;
+      }
+      .serial-btn.secondary { background: #111827; border-color: #334155; color: #e5e7eb; }
+      .serial-btn.danger { background: #991b1b; border-color: #dc2626; }
+      .serial-status {
+        border: 1px solid #334155;
+        border-radius: 8px;
+        color: #cbd5e1;
+        margin-bottom: 10px;
+        padding: 8px 10px;
+      }
+      .serial-status.good { border-color: #166534; color: #bbf7d0; }
+      .serial-status.warn { border-color: #854d0e; color: #fde68a; }
+      .serial-preview {
+        background: #020617;
+        border: 1px solid #1e293b;
+        border-radius: 8px;
+        color: #cbd5e1;
+        font: 12px/1.45 Consolas, monospace;
+        max-height: 160px;
+        min-height: 82px;
+        overflow: auto;
+        padding: 10px;
+        white-space: pre-wrap;
+      }
+      .serial-section-title {
+        color: #f8fafc;
+        font-size: 13px;
+        font-weight: 800;
+        margin: 14px 0 8px;
+      }
+      .serial-map {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .serial-map div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .serial-hint {
+        color: #94a3b8;
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      @media (max-width: 640px) {
+        .serial-grid { grid-template-columns: 1fr; }
+        .serial-map { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function createPanel() {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = `
+      <button class="serial-toggle" id="serialToggle" type="button">Serial Arduino</button>
+      <section class="serial-panel" id="serialPanel" aria-label="Ponte serial Arduino">
+        <div class="serial-head">
+          <strong>Entrada Serial Arduino</strong>
+          <button class="serial-close" id="serialClose" type="button" aria-label="Fechar">×</button>
+        </div>
+        <div class="serial-body">
+          <div class="serial-status" id="serialStatus">Aguardando conexao.</div>
+          <div class="serial-grid">
+            <div class="serial-field">
+              <label for="serialBaud">Baud rate</label>
+              <select id="serialBaud">
+                <option>9600</option>
+                <option>57600</option>
+                <option selected>115200</option>
+                <option>230400</option>
+                <option>460800</option>
+                <option>921600</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialParser">Parser</label>
+              <select id="serialParser">
+                <option value="csv" selected>CSV / colunas</option>
+                <option value="keyvalue">Chave=valor</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialSeparator">Separador CSV</label>
+              <select id="serialSeparator">
+                <option value="auto" selected>Auto</option>
+                <option value=",">Virgula</option>
+                <option value=";">Ponto e virgula</option>
+                <option value="tab">Tab</option>
+                <option value="space">Espaco</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialMaxSamples">Amostras no buffer</label>
+              <input id="serialMaxSamples" type="number" min="100" max="200000" step="100" value="5000" />
+            </div>
+            <div class="serial-field">
+              <label for="serialTimeUnit">Tempo</label>
+              <select id="serialTimeUnit">
+                <option value="ms" selected>ms</option>
+                <option value="s">s</option>
+                <option value="us">us</option>
+                <option value="none">sem tempo</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialAccelUnit">Acelerometro</label>
+              <select id="serialAccelUnit">
+                <option value="g" selected>g</option>
+                <option value="mps2">m/s2</option>
+                <option value="raw">raw MPU</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialGyroUnit">Giroscopio</label>
+              <select id="serialGyroUnit">
+                <option value="dps" selected>graus/s</option>
+                <option value="rads">rad/s</option>
+                <option value="raw">raw MPU</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialMagUnit">Magnetometro</label>
+              <select id="serialMagUnit">
+                <option value="ut" selected>uT</option>
+                <option value="raw">raw</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialAccelRange">Faixa accel raw</label>
+              <select id="serialAccelRange">
+                <option value="2">+/-2 g</option>
+                <option value="4">+/-4 g</option>
+                <option value="8">+/-8 g</option>
+                <option value="16" selected>+/-16 g</option>
+              </select>
+            </div>
+            <div class="serial-field">
+              <label for="serialGyroRange">Faixa gyro raw</label>
+              <select id="serialGyroRange">
+                <option value="250" selected>+/-250 graus/s</option>
+                <option value="500">+/-500 graus/s</option>
+                <option value="1000">+/-1000 graus/s</option>
+                <option value="2000">+/-2000 graus/s</option>
+              </select>
+            </div>
+          </div>
+          <div class="serial-row">
+            <button class="serial-btn" id="serialConnect" type="button">Conectar porta</button>
+            <button class="serial-btn secondary" id="serialDisconnect" type="button">Desconectar</button>
+            <button class="serial-btn secondary" id="serialPresetFull" type="button">Preset 10 colunas</button>
+            <button class="serial-btn secondary" id="serialPresetAcc" type="button">Preset Ax Ay Az</button>
+            <button class="serial-btn secondary" id="serialClear" type="button">Limpar</button>
+            <button class="serial-btn" id="serialDownload" type="button">Exportar CSV</button>
+          </div>
+          <div class="serial-section-title">Preview serial bruto</div>
+          <pre class="serial-preview" id="serialPreview">Sem dados ainda.</pre>
+          <div class="serial-section-title">Mapeamento de colunas</div>
+          <div class="serial-map" id="serialMapping"></div>
+          <div class="serial-hint">
+            Exporte o CSV e carregue no app em Fonte de dados -> CSV real. O CSV gerado usa:
+            tempo, ax, ay, az, gx, gy, gz, mx, my, mz.
+          </div>
+          <div class="serial-section-title">Preview normalizado</div>
+          <pre class="serial-preview" id="serialNormalized">Sem amostras normalizadas.</pre>
+        </div>
+      </section>
+    `;
+    document.body.appendChild(wrapper);
+  }
+
+  function setStatus(message, kind) {
+    const el = $("serialStatus");
+    if (!el) return;
+    el.textContent = message;
+    el.className = `serial-status ${kind || ""}`.trim();
+  }
+
+  function separatorForValue(value, line) {
+    if (value === "tab") return "\t";
+    if (value === "space") return /\s+/;
+    if (value && value !== "auto") return value;
+    if (line.includes(";")) return ";";
+    if (line.includes("\t")) return "\t";
+    if (line.includes(",")) return ",";
+    return /\s+/;
+  }
+
+  function parseCsvLine(line) {
+    const sep = separatorForValue($("serialSeparator").value, line);
+    const parts = typeof sep === "string" ? line.trim().split(sep) : line.trim().split(sep);
+    if (!parts.length) return null;
+    const values = parts.map((part) => Number(part.trim()));
+    if (values.some((value) => !Number.isFinite(value))) return null;
+    return values;
+  }
+
+  function parseKeyValueLine(line) {
+    const sample = {};
+    const re = /([a-zA-Z_][a-zA-Z0-9_]*)\s*[:=]\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+    let match;
+    while ((match = re.exec(line)) !== null) {
+      const key = match[1].toLowerCase().replace(/[^a-z0-9_]/g, "");
+      const field = KEY_ALIASES[key];
+      if (field) sample[field] = Number(match[2]);
+    }
+    return Object.keys(sample).length ? sample : null;
+  }
+
+  function rawAccelToG(raw) {
+    const range = Number($("serialAccelRange").value);
+    const scale = { 2: 16384, 4: 8192, 8: 4096, 16: 2048 }[range] || 2048;
+    return raw / scale;
+  }
+
+  function rawGyroToDps(raw) {
+    const range = Number($("serialGyroRange").value);
+    const scale = { 250: 131, 500: 65.5, 1000: 32.8, 2000: 16.4 }[range] || 131;
+    return raw / scale;
+  }
+
+  function convertTime(value) {
+    const unit = $("serialTimeUnit").value;
+    if (unit === "none" || value === null || value === undefined) return performance.now() / 1000;
+    if (unit === "s") return value;
+    if (unit === "us") return value / 1000000;
+    return value / 1000;
+  }
+
+  function convertAccel(value) {
+    const unit = $("serialAccelUnit").value;
+    if (unit === "mps2") return value / 9.80665;
+    if (unit === "raw") return rawAccelToG(value);
+    return value;
+  }
+
+  function convertGyro(value) {
+    const unit = $("serialGyroUnit").value;
+    if (unit === "rads") return value * 180 / Math.PI;
+    if (unit === "raw") return rawGyroToDps(value);
+    return value;
+  }
+
+  function convertMag(value) {
+    return value;
+  }
+
+  function sampleFromRow(row) {
+    const sample = {};
+    for (const field of FIELDS) {
+      const col = state.mapping[field];
+      sample[field] = col === null || col === undefined ? 0 : row[col] ?? 0;
+    }
+    return normalizeSample(sample);
+  }
+
+  function normalizeSample(sample) {
+    return {
+      tempo: convertTime(sample.tempo),
+      ax: convertAccel(sample.ax ?? 0),
+      ay: convertAccel(sample.ay ?? 0),
+      az: convertAccel(sample.az ?? 0),
+      gx: convertGyro(sample.gx ?? 0),
+      gy: convertGyro(sample.gy ?? 0),
+      gz: convertGyro(sample.gz ?? 0),
+      mx: convertMag(sample.mx ?? 0),
+      my: convertMag(sample.my ?? 0),
+      mz: convertMag(sample.mz ?? 0),
+    };
+  }
+
+  function parseLineToSample(line) {
+    const parser = $("serialParser").value;
+    if (parser === "keyvalue") {
+      const kv = parseKeyValueLine(line);
+      return kv ? normalizeSample(kv) : null;
+    }
+    const row = parseCsvLine(line);
+    if (!row) return null;
+    state.latestColumnCount = Math.max(state.latestColumnCount, row.length);
+    state.rows.push(row);
+    state.rows = state.rows.slice(-50);
+    buildMappingPanel(state.latestColumnCount);
+    return sampleFromRow(row);
+  }
+
+  function buildMappingPanel(columnCount) {
+    const panel = $("serialMapping");
+    if (!panel) return;
+    const options = ["<option value=\"\">Nenhum</option>"];
+    for (let i = 0; i < columnCount; i += 1) {
+      options.push(`<option value="${i}">Coluna ${i}</option>`);
+    }
+    panel.innerHTML = FIELDS.map((field) => {
+      const current = state.mapping[field];
+      const selectOptions = options
+        .join("")
+        .replace(`value="${current}"`, `value="${current}" selected`);
+      return `<div><label for="serialMap_${field}">${FIELD_LABELS[field]}</label><select id="serialMap_${field}" data-field="${field}">${selectOptions}</select></div>`;
+    }).join("");
+    panel.querySelectorAll("select[data-field]").forEach((select) => {
+      select.addEventListener("change", () => {
+        const value = select.value;
+        state.mapping[select.dataset.field] = value === "" ? null : Number(value);
+        rebuildSamplesFromRows();
+      });
+    });
+  }
+
+  function rebuildSamplesFromRows() {
+    const maxSamples = Number($("serialMaxSamples").value) || 5000;
+    state.samples = state.rows.map((row) => sampleFromRow(row)).slice(-maxSamples);
+    updateNormalizedPreview();
+  }
+
+  function updatePreview() {
+    $("serialPreview").textContent = state.rawLines.length ? state.rawLines.join("\n") : "Sem dados ainda.";
+  }
+
+  function updateNormalizedPreview() {
+    const rows = state.samples.slice(-8).map((sample) => FIELDS.map((field) => formatNumber(sample[field])).join(","));
+    $("serialNormalized").textContent = rows.length ? `tempo,ax,ay,az,gx,gy,gz,mx,my,mz\n${rows.join("\n")}` : "Sem amostras normalizadas.";
+  }
+
+  function formatNumber(value) {
+    if (!Number.isFinite(value)) return "0";
+    return Math.abs(value) >= 1000 ? value.toFixed(3) : value.toPrecision(8).replace(/0+$/, "").replace(/\.$/, "");
+  }
+
+  function ingestLine(line) {
+    const clean = line.trim();
+    if (!clean) return;
+    state.rawLines.push(clean);
+    state.rawLines = state.rawLines.slice(-12);
+    updatePreview();
+    const sample = parseLineToSample(clean);
+    if (sample) {
+      const maxSamples = Number($("serialMaxSamples").value) || 5000;
+      state.samples.push(sample);
+      state.samples = state.samples.slice(-maxSamples);
+      updateNormalizedPreview();
+      setStatus(`Recebendo: ${state.samples.length} amostras normalizadas.`, "good");
+    }
+  }
+
+  async function connectSerial() {
+    if (!("serial" in navigator)) {
+      setStatus("Web Serial nao esta disponivel. Use Chrome/Edge e, se necessario, abra por localhost.", "warn");
+      return;
+    }
+    try {
+      state.port = await navigator.serial.requestPort();
+      await state.port.open({ baudRate: Number($("serialBaud").value) || 115200 });
+      state.keepReading = true;
+      setStatus("Porta conectada. Lendo dados...", "good");
+      readLoop();
+    } catch (error) {
+      setStatus(`Falha ao conectar: ${error.message}`, "warn");
+    }
+  }
+
+  async function readLoop() {
+    const decoder = new TextDecoderStream();
+    state.inputDone = state.port.readable.pipeTo(decoder.writable);
+    state.reader = decoder.readable.getReader();
+    let buffer = "";
+    try {
+      while (state.keepReading) {
+        const { value, done } = await state.reader.read();
+        if (done) break;
+        if (!value) continue;
+        buffer += value;
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        for (const line of lines) ingestLine(line);
+      }
+    } catch (error) {
+      setStatus(`Leitura interrompida: ${error.message}`, "warn");
+    }
+  }
+
+  async function disconnectSerial() {
+    state.keepReading = false;
+    try {
+      if (state.reader) {
+        await state.reader.cancel();
+        state.reader.releaseLock();
+        state.reader = null;
+      }
+      if (state.inputDone) {
+        await state.inputDone.catch(() => {});
+        state.inputDone = null;
+      }
+      if (state.port) {
+        await state.port.close();
+        state.port = null;
+      }
+      setStatus("Porta desconectada.", "");
+    } catch (error) {
+      setStatus(`Falha ao desconectar: ${error.message}`, "warn");
+    }
+  }
+
+  function setPresetFull() {
+    state.mapping = { tempo: 0, ax: 1, ay: 2, az: 3, gx: 4, gy: 5, gz: 6, mx: 7, my: 8, mz: 9 };
+    state.latestColumnCount = Math.max(state.latestColumnCount, 10);
+    buildMappingPanel(state.latestColumnCount);
+    rebuildSamplesFromRows();
+  }
+
+  function setPresetAcc() {
+    state.mapping = { tempo: null, ax: 0, ay: 1, az: 2, gx: null, gy: null, gz: null, mx: null, my: null, mz: null };
+    state.latestColumnCount = Math.max(state.latestColumnCount, 3);
+    $("serialTimeUnit").value = "none";
+    buildMappingPanel(state.latestColumnCount);
+    rebuildSamplesFromRows();
+  }
+
+  function clearData() {
+    state.rawLines = [];
+    state.rows = [];
+    state.samples = [];
+    updatePreview();
+    updateNormalizedPreview();
+    setStatus("Buffer limpo.", "");
+  }
+
+  function downloadCsv() {
+    if (!state.samples.length) {
+      setStatus("Nao ha amostras para exportar.", "warn");
+      return;
+    }
+    const header = "tempo,ax,ay,az,gx,gy,gz,mx,my,mz";
+    const body = state.samples.map((sample) => FIELDS.map((field) => formatNumber(sample[field])).join(",")).join("\n");
+    const blob = new Blob([`${header}\n${body}\n`], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `arduino_mpu9250_${new Date().toISOString().replace(/[:.]/g, "-")}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setStatus(`CSV exportado com ${state.samples.length} amostras.`, "good");
+  }
+
+  function wireEvents() {
+    $("serialToggle").addEventListener("click", () => $("serialPanel").classList.toggle("open"));
+    $("serialClose").addEventListener("click", () => $("serialPanel").classList.remove("open"));
+    $("serialConnect").addEventListener("click", connectSerial);
+    $("serialDisconnect").addEventListener("click", disconnectSerial);
+    $("serialPresetFull").addEventListener("click", setPresetFull);
+    $("serialPresetAcc").addEventListener("click", setPresetAcc);
+    $("serialClear").addEventListener("click", clearData);
+    $("serialDownload").addEventListener("click", downloadCsv);
+    ["serialTimeUnit", "serialAccelUnit", "serialGyroUnit", "serialMagUnit", "serialAccelRange", "serialGyroRange"].forEach((id) => {
+      $(id).addEventListener("change", rebuildSamplesFromRows);
+    });
+    $("serialParser").addEventListener("change", () => {
+      rebuildSamplesFromRows();
+      setStatus($("serialParser").value === "keyvalue" ? "Parser chave=valor ativo." : "Parser CSV ativo.", "");
+    });
+  }
+
+  function init() {
+    injectStyles();
+    createPanel();
+    buildMappingPanel(10);
+    wireEvents();
+    if (!("serial" in navigator)) {
+      setStatus("Web Serial indisponivel neste navegador. Use Chrome/Edge. Em alguns casos, file:// bloqueia serial; use localhost.", "warn");
+    }
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/@stlite/mountable@0.63.1/build/stlite.js"></script>
+    <script>
+      const appSource = "import math\nimport numpy as np\nimport pandas as pd\nimport plotly.graph_objects as go\nimport plotly.subplots as sp\nimport streamlit as st\nfrom scipy.fft import fft, fftfreq\nfrom scipy.signal import (\n    bessel,\n    butter,\n    cheby1,\n    cheby2,\n    detrend,\n    ellip,\n    filtfilt,\n    freqz,\n    get_window,\n    hilbert,\n    iirnotch,\n    lfilter,\n    spectrogram,\n)\nfrom scipy.stats import kurtosis, skew\n\nEPS = 1e-12\nG0 = 9.80665\n\nst.set_page_config(page_title=\"DSP MPU-9250 Realista\", layout=\"wide\")\n\nSENSOR_PRESETS = {\n    \"MPU-9250 realista\": {\n        \"bits\": 16,\n        \"acc_ranges\": [2, 4, 8, 16],\n        \"gyro_ranges\": [250, 500, 1000, 2000],\n        \"acc_default\": 16,\n        \"gyro_default\": 250,\n        \"mag_range\": 4800,\n        \"acc_noise_density\": 300e-6,\n        \"gyro_noise_density\": 0.01,\n        \"mag_noise_density\": 0.08,\n        \"acc_bias_xy\": 0.060,\n        \"acc_bias_z\": 0.080,\n        \"gyro_bias\": 5.0,\n        \"mag_bias\": 25.0,\n        \"scale_tol_pct\": 3.0,\n        \"cross_axis_pct\": 2.0,\n        \"nonlinearity_pct\": 0.5,\n        \"acc_dlpf\": [5, 10, 20, 41, 92, 184, 260, 460],\n        \"gyro_dlpf\": [5, 10, 20, 41, 92, 184, 250],\n        \"mag_dlpf\": [5, 10, 20, 50, 100],\n    },\n    \"IMU generica 16-bit\": {\n        \"bits\": 16,\n        \"acc_ranges\": [2, 4, 8, 16],\n        \"gyro_ranges\": [250, 500, 1000, 2000],\n        \"acc_default\": 8,\n        \"gyro_default\": 500,\n        \"mag_range\": 4800,\n        \"acc_noise_density\": 500e-6,\n        \"gyro_noise_density\": 0.02,\n        \"mag_noise_density\": 0.12,\n        \"acc_bias_xy\": 0.100,\n        \"acc_bias_z\": 0.120,\n        \"gyro_bias\": 8.0,\n        \"mag_bias\": 35.0,\n        \"scale_tol_pct\": 5.0,\n        \"cross_axis_pct\": 3.0,\n        \"nonlinearity_pct\": 1.0,\n        \"acc_dlpf\": [10, 25, 50, 100, 200, 400],\n        \"gyro_dlpf\": [10, 25, 50, 100, 200],\n        \"mag_dlpf\": [5, 10, 20, 50, 100],\n    },\n    \"Sensor industrial IEPE + DAQ\": {\n        \"bits\": 24,\n        \"acc_ranges\": [5, 10, 20, 50],\n        \"gyro_ranges\": [250, 500, 1000, 2000],\n        \"acc_default\": 10,\n        \"gyro_default\": 500,\n        \"mag_range\": 4800,\n        \"acc_noise_density\": 30e-6,\n        \"gyro_noise_density\": 0.005,\n        \"mag_noise_density\": 0.05,\n        \"acc_bias_xy\": 0.010,\n        \"acc_bias_z\": 0.010,\n        \"gyro_bias\": 1.0,\n        \"mag_bias\": 10.0,\n        \"scale_tol_pct\": 1.0,\n        \"cross_axis_pct\": 1.0,\n        \"nonlinearity_pct\": 0.2,\n        \"acc_dlpf\": [100, 250, 500, 1000, 2000],\n        \"gyro_dlpf\": [100, 250, 500, 1000],\n        \"mag_dlpf\": [20, 50, 100],\n    },\n}\n\ndef clamp(value, low, high):\n    return float(np.clip(value, low, high))\n\ndef rotation_matrix(roll_deg, pitch_deg, yaw_deg):\n    roll = np.deg2rad(roll_deg)\n    pitch = np.deg2rad(pitch_deg)\n    yaw = np.deg2rad(yaw_deg)\n    rx = np.array(\n        [[1, 0, 0], [0, np.cos(roll), -np.sin(roll)], [0, np.sin(roll), np.cos(roll)]]\n    )\n    ry = np.array(\n        [[np.cos(pitch), 0, np.sin(pitch)], [0, 1, 0], [-np.sin(pitch), 0, np.cos(pitch)]]\n    )\n    rz = np.array(\n        [[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]]\n    )\n    return rz @ ry @ rx\n\ndef design_filter(fs, tipo, familia, ordem, fc1, fc2, q_notch):\n    nyq = fs / 2.0\n    if tipo == \"Nenhum\" or nyq <= 0:\n        return np.array([1.0]), np.array([1.0])\n    try:\n        if tipo == \"Notch\":\n            return iirnotch(w0=clamp(fc1 / nyq, 1e-6, 0.999999), Q=max(float(q_notch), 0.1))\n\n        if tipo in (\"Passa-baixas\", \"Passa-altas\"):\n            wn = clamp(fc1 / nyq, 1e-6, 0.999999)\n            btype = \"low\" if tipo == \"Passa-baixas\" else \"high\"\n        elif tipo in (\"Passa-faixa\", \"Rejeita-faixa\"):\n            f_low = clamp(min(fc1, fc2), 1e-6, nyq * 0.999)\n            f_high = clamp(max(fc1, fc2), 1e-6, nyq * 0.999)\n            if f_low >= f_high:\n                return np.array([1.0]), np.array([1.0])\n            wn = [f_low / nyq, f_high / nyq]\n            btype = \"bandpass\" if tipo == \"Passa-faixa\" else \"bandstop\"\n        else:\n            return np.array([1.0]), np.array([1.0])\n\n        ordem = int(max(1, ordem))\n        if familia == \"Butterworth\":\n            return butter(ordem, wn, btype=btype)\n        if familia == \"Chebyshev I\":\n            return cheby1(ordem, 1, wn, btype=btype)\n        if familia == \"Chebyshev II\":\n            return cheby2(ordem, 40, wn, btype=btype)\n        if familia == \"Eliptico\":\n            return ellip(ordem, 1, 40, wn, btype=btype)\n        if familia == \"Bessel\":\n            return bessel(ordem, wn, btype=btype, norm=\"phase\")\n    except Exception:\n        pass\n    return np.array([1.0]), np.array([1.0])\n\ndef apply_filter(signal, fs, tipo, familia, ordem, fc1, fc2, q_notch):\n    signal = np.asarray(signal, dtype=float)\n    if len(signal) < 12 or tipo == \"Nenhum\":\n        return signal.copy()\n    b, a = design_filter(fs, tipo, familia, ordem, fc1, fc2, q_notch)\n    if len(b) == 1 and len(a) == 1:\n        return signal.copy()\n    try:\n        return filtfilt(b, a, signal)\n    except Exception:\n        try:\n            return lfilter(b, a, signal)\n        except Exception:\n            return signal.copy()\n\ndef lowpass(signal, fs, cutoff_hz, ordem=2, familia=\"Butterworth\"):\n    signal = np.asarray(signal, dtype=float)\n    nyq = fs / 2.0\n    if cutoff_hz <= 0 or cutoff_hz >= nyq or len(signal) < 24:\n        return signal.copy()\n    try:\n        if familia == \"Bessel\":\n            b, a = bessel(ordem, cutoff_hz / nyq, btype=\"low\", norm=\"phase\")\n        else:\n            b, a = butter(ordem, cutoff_hz / nyq, btype=\"low\")\n        return filtfilt(b, a, signal)\n    except Exception:\n        return signal.copy()\n\ndef signed_adc(signal, bits, full_scale, enob_bits, rng):\n    signal = np.asarray(signal, dtype=float)\n    bits = int(bits)\n    full_scale = max(float(full_scale), EPS)\n    lsb = (2.0 * full_scale) / (2**bits)\n    clipped = np.clip(signal, -full_scale, full_scale - lsb)\n    saturation = 100.0 * float(np.mean(signal != clipped))\n    codes = np.round(clipped / lsb)\n    min_code = -(2 ** (bits - 1))\n    max_code = 2 ** (bits - 1) - 1\n    codes = np.clip(codes, min_code, max_code)\n    quantized = codes * lsb\n    if enob_bits < bits:\n        quant_rms = lsb / math.sqrt(12)\n        extra_noise = quant_rms * math.sqrt(max(0.0, 2 ** (2 * (bits - enob_bits)) - 1))\n        quantized = quantized + rng.normal(0, extra_noise, size=quantized.shape)\n    return quantized, codes.astype(int), lsb, saturation\n\ndef apply_sensor_errors(data_3xn, rng, bias_vec, scale_tol_pct, cross_axis_pct, noise_density, bandwidth, nonlin_pct):\n    data = np.asarray(data_3xn, dtype=float).copy()\n    scale = 1.0 + rng.normal(0, scale_tol_pct / 100.0 / 3.0, size=3)\n    cross = np.eye(3) + rng.normal(0, cross_axis_pct / 100.0 / 3.0, size=(3, 3))\n    np.fill_diagonal(cross, scale)\n    data = cross @ data\n    data += np.asarray(bias_vec, dtype=float).reshape(3, 1)\n    data += (nonlin_pct / 100.0) * (data**3) / np.maximum(np.nanmax(np.abs(data)) ** 2, 1.0)\n    noise_std = abs(noise_density) * math.sqrt(max(float(bandwidth), 1.0))\n    data += rng.normal(0, noise_std, size=data.shape)\n    return data\n\ndef resample_with_jitter(t_high, signals, fs_out, jitter_us, dropout_pct, rng):\n    t_nom = np.arange(t_high[0], t_high[-1] + EPS, 1.0 / fs_out)\n    if jitter_us > 0:\n        t_real = t_nom + rng.normal(0, jitter_us * 1e-6, size=len(t_nom))\n        t_real = np.clip(t_real, t_high[0], t_high[-1])\n        t_real = np.maximum.accumulate(t_real)\n    else:\n        t_real = t_nom\n\n    output = [np.interp(t_real, t_high, sig) for sig in signals]\n    if dropout_pct > 0 and len(t_nom) > 5:\n        mask = rng.random(len(t_nom)) < (dropout_pct / 100.0)\n        mask[0] = False\n        mask[-1] = False\n        idx = np.arange(len(t_nom))\n        for i, y in enumerate(output):\n            y = y.copy()\n            y[mask] = np.nan\n            good = np.isfinite(y)\n            if np.any(good):\n                y[~good] = np.interp(idx[~good], idx[good], y[good])\n            output[i] = y\n    return t_nom, t_real, output\n\ndef prepare_fft(signal, fs, window_name, zero_padding, detrend_mode):\n    x = np.asarray(signal, dtype=float).copy()\n    n = len(x)\n    if n < 2:\n        return np.array([]), np.array([]), 0.0\n    if detrend_mode == \"Constante\":\n        x = x - np.mean(x)\n    elif detrend_mode == \"Linear\":\n        x = detrend(x, type=\"linear\")\n    window = get_window(window_name.split(\" \")[0], n)\n    n_pad = max(int(n * zero_padding), n)\n    x_pad = np.pad(x * window, (0, n_pad - n), mode=\"constant\")\n    xf = fftfreq(n_pad, 1 / fs)[: n_pad // 2]\n    gain = np.sum(window) / n if np.sum(window) > 0 else 1.0\n    yf = (2.0 / (n * gain + EPS)) * np.abs(fft(x_pad)[: n_pad // 2])\n    return xf, yf, fs / n_pad\n\ndef band_energy(xf, yf, f1, f2):\n    idx = (xf >= f1) & (xf < f2)\n    if np.sum(idx) == 0:\n        return 0.0\n    return float(np.sum(yf[idx] ** 2))\n\ndef harmonic_analysis(xf, yf, f_rot, fs):\n    if len(xf) < 2 or f_rot <= 0:\n        return pd.DataFrame(), [np.nan] * 5, 0.0, 0.0\n    delta = xf[1] - xf[0]\n    tol = max(2.0 * delta, 0.04 * f_rot)\n    mags = []\n    for n in range(1, 6):\n        target = n * f_rot\n        if target >= fs / 2:\n            mags.append(np.nan)\n            continue\n        idx = np.where(np.abs(xf - target) <= tol)[0]\n        mags.append(float(np.max(yf[idx])) if len(idx) else 0.0)\n    mag1 = mags[0] if not np.isnan(mags[0]) else 0.0\n    rel = [(m / (mag1 + EPS) if not np.isnan(m) else np.nan) for m in mags]\n    harmonic_index = float(np.nansum(mags[1:]) / (mag1 + EPS))\n    thd = float(np.sqrt(np.nansum(np.array(mags[1:]) ** 2)) / (mag1 + EPS))\n    df = pd.DataFrame(\n        {\n            \"Harmonica\": [\"1X\", \"2X\", \"3X\", \"4X\", \"5X\"],\n            \"Frequencia Hz\": [round(n * f_rot, 2) for n in range(1, 6)],\n            \"Magnitude\": [None if np.isnan(m) else round(m, 6) for m in mags],\n            \"Relacao 1X\": [None if np.isnan(r) else round(r, 4) for r in rel],\n            \"Nyquist\": [\"Fora\" if n * f_rot >= fs / 2 else \"OK\" for n in range(1, 6)],\n        }\n    )\n    return df, mags, harmonic_index, thd\n\ndef interpretar_ordem(ordem):\n    if ordem == 1:\n        return \"1X: rotação fundamental; pode estar associada à componente síncrona e desbalanceamento.\"\n    if ordem == 2:\n        return \"2X: segunda ordem; pode indicar desalinhamento, ovalização ou assimetria.\"\n    if ordem in (3, 4, 5):\n        return \"Ordem superior; pode indicar folga mecânica, não linearidade, impacto ou ressonância.\"\n    return \"Ordem elevada; avaliar junto com STFT, envelope, RMS, curtose e fator de crista.\"\n\n\ndef order_tracking_analysis(xf, yf, f_rot, fs, max_order=10):\n    if len(xf) < 2 or f_rot <= 0:\n        return pd.DataFrame(), np.array([]), np.array([])\n\n    orders_axis = xf / f_rot\n    delta_f = xf[1] - xf[0]\n    tolerancia = max(2.0 * delta_f, 0.04 * f_rot)\n    rows = []\n\n    for ordem in range(1, max_order + 1):\n        freq_alvo = ordem * f_rot\n        if freq_alvo >= fs / 2.0:\n            rows.append({\n                \"Ordem\": f\"{ordem}X\",\n                \"Frequência (Hz)\": round(freq_alvo, 2),\n                \"Magnitude\": None,\n                \"Relação com 1X\": None,\n                \"Status\": \"Fora de Nyquist\",\n                \"Interpretação\": \"Frequência fora da banda útil de análise.\"\n            })\n            continue\n\n        idx = np.where(np.abs(xf - freq_alvo) <= tolerancia)[0]\n        magnitude = float(np.max(yf[idx])) if len(idx) else 0.0\n        rows.append({\n            \"Ordem\": f\"{ordem}X\",\n            \"Frequência (Hz)\": round(freq_alvo, 2),\n            \"Magnitude\": round(magnitude, 6),\n            \"Relação com 1X\": None,\n            \"Status\": \"OK\",\n            \"Interpretação\": interpretar_ordem(ordem),\n        })\n\n    mag_1x = rows[0][\"Magnitude\"] if rows and rows[0][\"Magnitude\"] is not None else 0.0\n    for row in rows:\n        if row[\"Magnitude\"] is not None and mag_1x > 0:\n            row[\"Relação com 1X\"] = round(row[\"Magnitude\"] / (mag_1x + EPS), 4)\n\n    return pd.DataFrame(rows), orders_axis, yf\n\ndef metrics(x):\n    x = np.asarray(x, dtype=float)\n    if len(x) == 0:\n        return 0, 0, 0, 0, 0\n    rms = float(np.sqrt(np.mean(x**2)))\n    peak = float(np.max(np.abs(x)))\n    crest = peak / (rms + EPS)\n    kurt = float(kurtosis(x, fisher=False)) if len(x) > 3 else 0\n    asym = float(skew(x)) if len(x) > 3 else 0\n    return rms, peak, crest, kurt, asym\n\ndef automatic_diagnosis(mags, harmonic_index, thd, kurt, crest, channel, rms, limite_bom_rms=0.035, limite_atencao_rms=0.090):\n    if len(mags) < 5 or np.isnan(mags[0]) or mags[0] <= 0:\n        if rms < limite_bom_rms:\n            return \"Motor BOM\", 0, f\"RMS={rms:.4f} g abaixo do limiar de condição normal.\"\n        return \"Indefinido\", 0, \"Magnitude 1X insuficiente para comparacao harmonica.\"\n\n    mag1 = mags[0]\n    r2 = 0 if np.isnan(mags[1]) else mags[1] / (mag1 + EPS)\n    r3 = 0 if np.isnan(mags[2]) else mags[2] / (mag1 + EPS)\n    r4 = 0 if np.isnan(mags[3]) else mags[3] / (mag1 + EPS)\n    r5 = 0 if np.isnan(mags[4]) else mags[4] / (mag1 + EPS)\n\n    harmonicas_baixas = r2 < 0.30 and r3 < 0.22 and r4 < 0.18 and r5 < 0.15 and thd < 0.45\n    baixa_impulsividade = crest < 3.50 and kurt < 4.20\n\n    if rms < limite_bom_rms and harmonicas_baixas and baixa_impulsividade:\n        reason = (\n            f\"RMS={rms:.4f} g, THD={thd:.2f}, 2X/1X={r2:.2f}, 3X/1X={r3:.2f}, \"\n            f\"curtose={kurt:.2f}, fator de crista={crest:.2f}. Indicadores dentro da faixa normal.\"\n        )\n        return \"Motor BOM\", 0, reason\n\n    score_desbalanceamento = 0.0\n    score_desalinhamento = 0.0\n    score_folga = 0.0\n    score_rolamento = 0.0\n\n    fator_rms = np.clip(rms / max(limite_atencao_rms, EPS), 0.0, 1.0)\n\n    if rms >= limite_bom_rms and r2 < 0.45:\n        score_desbalanceamento = min(100, 80 * max(0, 1.0 - r2) * fator_rms)\n\n    if r2 > 0.35:\n        score_desalinhamento = min(100, 100 * (r2 / 1.20) * max(fator_rms, 0.35))\n\n    harmonic_flags = int(r2 > 0.30) + int(r3 > 0.25) + int(r4 > 0.20) + int(r5 > 0.15)\n    if harmonic_flags >= 2:\n        score_folga = min(100, 22 * harmonic_flags + 30 * min(thd, 1.0))\n\n    if crest > 3.8 or kurt > 4.5:\n        score_rolamento = min(100, 12 * crest + 10 * max(0, kurt - 3.0))\n\n    scores = {\n        \"Desbalanceamento provável\": score_desbalanceamento,\n        \"Desalinhamento provável\": score_desalinhamento,\n        \"Folga mecânica provável\": score_folga,\n        \"Falha impulsiva/rolamento provável\": score_rolamento,\n    }\n    fault = max(scores, key=scores.get)\n    severity = int(np.clip(scores[fault], 0, 100))\n\n    if severity < 25:\n        if rms < limite_atencao_rms:\n            reason = (\n                f\"RMS={rms:.4f} g. Alterações leves nos indicadores, mas sem assinatura dominante de falha. \"\n                f\"2X/1X={r2:.2f}, THD={thd:.2f}, curtose={kurt:.2f}.\"\n            )\n            return \"Atenção: sem falha dominante\", severity, reason\n        reason = (\n            f\"RMS={rms:.4f} g acima da faixa normal, porém sem padrão harmônico conclusivo. \"\n            f\"2X/1X={r2:.2f}, THD={thd:.2f}, curtose={kurt:.2f}.\"\n        )\n        return \"Atenção: vibração elevada sem falha dominante\", severity, reason\n\n    reason = (\n        f\"Canal: {channel}. RMS={rms:.4f} g. 2X/1X={r2:.2f}, 3X/1X={r3:.2f}, \"\n        f\"4X/1X={r4:.2f}, 5X/1X={r5:.2f}. THD={thd:.2f}, \"\n        f\"indice harmonico={harmonic_index:.2f}, curtose={kurt:.2f}, fator de crista={crest:.2f}.\"\n    )\n    return fault, severity, reason\n\ndef generate_physical_signals(t, fs_high, condition, f_rot, vibration_gain, fault_severity, hf_interference_g):\n    w = 2 * np.pi * f_rot * t\n    sev = max(float(fault_severity), 0.0)\n\n    base_x = 0.025 * np.sin(w)\n    base_y = 0.020 * np.cos(w)\n    base_z = 0.012 * np.sin(w + 0.2)\n\n    fault_x = np.zeros_like(t)\n    fault_y = np.zeros_like(t)\n    fault_z = np.zeros_like(t)\n\n    if condition == \"Maquina saudavel\":\n        fault_x += 0.006 * np.sin(2 * w)\n        fault_y += 0.004 * np.cos(2 * w)\n\n    elif condition == \"Desbalanceamento\":\n        fault_x += sev * 0.42 * np.sin(w)\n        fault_y += sev * 0.40 * np.cos(w)\n        fault_z += sev * 0.045 * np.sin(w)\n\n    elif condition == \"Desalinhamento\":\n        fault_x += 0.08 * np.sin(w) + sev * 0.35 * np.sin(2 * w)\n        fault_y += 0.07 * np.cos(w) + sev * 0.28 * np.cos(2 * w)\n        fault_z += sev * 0.25 * np.sin(2 * w)\n\n    elif condition == \"Folga mecanica\":\n        fault_x += sev * sum((0.20 / h) * np.sin(h * w + 0.1 * h) for h in range(1, 6))\n        fault_y += sev * sum((0.18 / h) * np.cos(h * w) for h in range(1, 6))\n        fault_z += sev * 0.50 * fault_x + 0.04 * np.sin(0.5 * w)\n\n    else:\n        impacts = np.maximum(0, np.sin(6 * w)) ** 18\n        resonance = min(0.22 * fs_high, 1200.0)\n        bearing_fault = sev * 0.35 * impacts * np.sin(2 * np.pi * resonance * t)\n        fault_x += 0.03 * np.sin(w) + bearing_fault\n        fault_y += 0.025 * np.cos(w) + 0.6 * bearing_fault\n        fault_z += 0.015 * np.sin(w) + 0.8 * bearing_fault\n\n    hf = hf_interference_g * np.sin(2 * np.pi * (0.42 * fs_high) * t + 0.5)\n\n    acc = vibration_gain * np.vstack([\n        base_x + fault_x + hf,\n        base_y + fault_y + 0.5 * hf,\n        base_z + fault_z,\n    ])\n\n    gyro = np.vstack([2.0 * np.sin(w), 4.0 * np.sin(2 * w), 1.5 * np.cos(w)])\n    if condition == \"Desalinhamento\":\n        gyro[1] += sev * 8.0 * np.sin(2 * w)\n    if condition == \"Folga mecanica\":\n        gyro[0] += sev * 5.0 * np.sin(3 * w)\n        gyro[1] += sev * 4.0 * np.sin(4 * w)\n    if condition == \"Falha em rolamento\":\n        gyro[0] += sev * 2.0 * np.sin(6 * w)\n        gyro[1] += sev * 2.0 * np.sin(8 * w)\n\n    earth = np.array([22.0, 5.0, 36.0]).reshape(3, 1)\n    motor = np.vstack([2.0 * np.sin(w), 1.5 * np.cos(w), 3.0 * np.sin(w)])\n    mains = 1.2 * np.sin(2 * np.pi * 60.0 * t)\n    mag = earth + motor + np.vstack([mains, mains, mains])\n    if condition in (\"Desalinhamento\", \"Falha em rolamento\"):\n        mag[2] += sev * 2.0 * np.sin(2 * w)\n\n    return acc, gyro, mag\n\ndef select_channel(name, data):\n    if name == \"Acelerometro X\":\n        return data[\"acc\"][0], \"g\"\n    if name == \"Acelerometro Y\":\n        return data[\"acc\"][1], \"g\"\n    if name == \"Acelerometro Z\":\n        return data[\"acc\"][2], \"g\"\n    if name == \"Resultante Acelerometro\":\n        r = np.sqrt(np.sum(data[\"acc\"] ** 2, axis=0))\n        return r - np.mean(r), \"g\"\n    if name == \"Giroscopio X\":\n        return data[\"gyro\"][0], \"graus/s\"\n    if name == \"Giroscopio Y\":\n        return data[\"gyro\"][1], \"graus/s\"\n    if name == \"Giroscopio Z\":\n        return data[\"gyro\"][2], \"graus/s\"\n    if name == \"Resultante Giroscopio\":\n        r = np.sqrt(np.sum(data[\"gyro\"] ** 2, axis=0))\n        return r - np.mean(r), \"graus/s\"\n    if name == \"Magnetometro X\":\n        return data[\"mag\"][0], \"uT\"\n    if name == \"Magnetometro Y\":\n        return data[\"mag\"][1], \"uT\"\n    if name == \"Magnetometro Z\":\n        return data[\"mag\"][2], \"uT\"\n    if name == \"Resultante Magnetometro\":\n        r = np.sqrt(np.sum(data[\"mag\"] ** 2, axis=0))\n        return r - np.mean(r), \"uT\"\n    return data[\"acc\"][0], \"g\"\n\nst.title(\"DSP MPU-9250 de aquisicao\")\nst.caption(\"Modelo: maquina fisica, sensor MEMS 9 eixos, DLPF, anti-aliasing, jitter, perda de amostras, ADC, filtros digitais e analise espectral.\")\n\nst.sidebar.title(\"Bancada realista\")\nmode = st.sidebar.radio(\"Fonte de dados\", [\"Simulacao realista\", \"CSV real\"], index=0)\n\npreset_name = st.sidebar.selectbox(\"Preset de sensor\", list(SENSOR_PRESETS.keys()))\npreset = SENSOR_PRESETS[preset_name]\n\nst.sidebar.header(\"1. Maquina\")\ncondition = st.sidebar.selectbox(\n    \"Condicao mecanica\",\n    [\"Maquina saudavel\", \"Desbalanceamento\", \"Desalinhamento\", \"Folga mecanica\", \"Falha em rolamento\"],\n)\nrpm = int(st.sidebar.number_input(\"Rotacao do motor RPM\", min_value=1, value=1800, step=60))\nf_rot = rpm / 60.0\nvibration_gain = st.sidebar.number_input(\"Amplitude global da vibracao\", min_value=0.0, value=1.0, step=0.1, format=\"%.3f\")\nfault_severity = st.sidebar.number_input(\"Severidade da falha\", min_value=0.0, value=1.0, step=0.1, format=\"%.3f\")\nhf_interference_g = st.sidebar.number_input(\"Interferencia acima de Nyquist (g)\", min_value=0.0, value=0.10, step=0.01, format=\"%.4f\")\n\nst.sidebar.header(\"2. Aquisicao\")\nfs = int(st.sidebar.number_input(\"Taxa de saida Fs (Hz)\", min_value=1, value=1000, step=100))\nduration = st.sidebar.number_input(\"Tempo de aquisicao (s)\", min_value=0.01, value=2.0, step=0.1, format=\"%.3f\")\nbits_adc = int(st.sidebar.number_input(\"Bits do registrador/ADC\", min_value=1, max_value=32, value=int(preset[\"bits\"]), step=1))\nenob_bits = st.sidebar.number_input(\"ENOB efetivo\", min_value=1.0, max_value=float(bits_adc), value=min(float(bits_adc), 14.5), step=0.5, format=\"%.1f\")\noversampling = int(st.sidebar.number_input(\"Oversampling analogico simulado\", min_value=1, value=20, step=1))\njitter_us = st.sidebar.number_input(\"Jitter de amostragem (us RMS)\", min_value=0.0, value=2.0, step=0.5, format=\"%.3f\")\ndropout_pct = st.sidebar.number_input(\"Perda de amostras (%)\", min_value=0.0, max_value=100.0, value=0.0, step=0.1, format=\"%.3f\")\nseed = st.sidebar.number_input(\"Seed\", 0, 99999, 42, step=1)\nrng = np.random.default_rng(int(seed))\n\nst.sidebar.header(\"3. Acelerometro\")\nacc_fs = st.sidebar.number_input(\"Faixa do acelerometro (+/- g)\", min_value=0.1, value=float(preset[\"acc_default\"]), step=0.1, format=\"%.3f\")\nst.sidebar.caption(\"A faixa define o fundo de escala usado na saturacao e no LSB do ADC do acelerometro.\")\n\nacc_gain_ax = st.sidebar.number_input(\"Ganho Ax\", min_value=0.0, value=1.0, step=0.01, format=\"%.3f\")\nacc_gain_ay = st.sidebar.number_input(\"Ganho Ay\", min_value=0.0, value=1.0, step=0.01, format=\"%.3f\")\nacc_gain_az = st.sidebar.number_input(\"Ganho Az\", min_value=0.0, value=1.0, step=0.01, format=\"%.3f\")\n\nacc_bias_ax = st.sidebar.number_input(\"Bias Ax (g)\", value=0.0, step=0.001, format=\"%.4f\")\nacc_bias_ay = st.sidebar.number_input(\"Bias Ay (g)\", value=0.0, step=0.001, format=\"%.4f\")\nacc_bias_az = st.sidebar.number_input(\"Bias Az (g)\", value=0.0, step=0.001, format=\"%.4f\")\n\nst.sidebar.header(\"4. Giroscopio e magnetometro\")\ngyro_fs = st.sidebar.number_input(\"Faixa do giroscopio (+/- graus/s)\", min_value=1.0, value=float(preset[\"gyro_default\"]), step=1.0, format=\"%.3f\")\nmag_fs = st.sidebar.number_input(\"Faixa do magnetometro (+/- uT)\", min_value=1.0, value=float(preset[\"mag_range\"]), step=1.0, format=\"%.3f\")\n\nst.sidebar.header(\"5. Erros residuais do sensor\")\nbias_gain = st.sidebar.number_input(\"Intensidade de bias/drift residual\", min_value=0.0, value=1.0, step=0.1, format=\"%.3f\")\nscale_pct = st.sidebar.number_input(\"Erro de escala residual (%)\", min_value=0.0, value=float(preset[\"scale_tol_pct\"]), step=0.1, format=\"%.3f\")\ncross_axis_pct = st.sidebar.number_input(\"Acoplamento entre eixos (%)\", min_value=0.0, value=float(preset[\"cross_axis_pct\"]), step=0.1, format=\"%.3f\")\ntemp_c = st.sidebar.number_input(\"Temperatura (C)\", value=30.0, step=1.0, format=\"%.3f\")\n\nst.sidebar.header(\"6. Gravidade e orientacao\")\ninclude_gravity = st.sidebar.checkbox(\"Incluir gravidade no acelerometro\", value=True)\nroll = st.sidebar.number_input(\"Roll do sensor (graus)\", value=0.0, step=1.0, format=\"%.3f\")\npitch = st.sidebar.number_input(\"Pitch do sensor (graus)\", value=0.0, step=1.0, format=\"%.3f\")\nyaw = st.sidebar.number_input(\"Yaw do sensor (graus)\", value=0.0, step=1.0, format=\"%.3f\")\n\nst.sidebar.header(\"7. DLPF e anti-aliasing\")\ndlpf_acc = st.sidebar.number_input(\"DLPF acelerometro (Hz)\", min_value=0.1, value=float(preset[\"acc_dlpf\"][min(4, len(preset[\"acc_dlpf\"]) - 1)]), step=0.1, format=\"%.3f\")\ndlpf_gyro = st.sidebar.number_input(\"DLPF giroscopio (Hz)\", min_value=0.1, value=float(preset[\"gyro_dlpf\"][min(4, len(preset[\"gyro_dlpf\"]) - 1)]), step=0.1, format=\"%.3f\")\ndlpf_mag = st.sidebar.number_input(\"Filtro magnetometro (Hz)\", min_value=0.1, value=float(preset[\"mag_dlpf\"][min(3, len(preset[\"mag_dlpf\"]) - 1)]), step=0.1, format=\"%.3f\")\naa_enabled = st.sidebar.checkbox(\"Aplicar anti-aliasing antes do ADC\", value=True)\naa_cutoff = st.sidebar.number_input(\"Corte anti-aliasing (Hz)\", min_value=0.1, value=float(min(float(max(10, fs / 2 - 1)), fs * 0.45)), step=1.0, format=\"%.3f\")\naa_order = int(st.sidebar.number_input(\"Ordem anti-aliasing\", min_value=1, value=4, step=1))\naa_family = st.sidebar.selectbox(\"Familia anti-aliasing\", [\"Butterworth\", \"Bessel\"])\n\nst.sidebar.header(\"8. FFT\")\ndetrend_mode = st.sidebar.selectbox(\"Detrending\", [\"Nenhum\", \"Constante\", \"Linear\"], index=1)\nwindow_name = st.sidebar.selectbox(\"Janela\", [\"hann\", \"hamming\", \"flattop\", \"boxcar\", \"blackman\"], index=0)\nzero_padding = int(st.sidebar.number_input(\"Zero-padding\", min_value=1, value=4, step=1))\n\nst.sidebar.header(\"9. Canal de analise\")\nchannel_name = st.sidebar.selectbox(\n    \"Canal para DSP\",\n    [\n        \"Acelerometro X\",\n        \"Acelerometro Y\",\n        \"Acelerometro Z\",\n        \"Resultante Acelerometro\",\n        \"Giroscopio X\",\n        \"Giroscopio Y\",\n        \"Giroscopio Z\",\n        \"Resultante Giroscopio\",\n        \"Magnetometro X\",\n        \"Magnetometro Y\",\n        \"Magnetometro Z\",\n        \"Resultante Magnetometro\",\n    ],\n    index=3,\n)\n\nst.sidebar.header(\"10. Filtros digitais pos-ADC\")\ndigital_enabled = st.sidebar.checkbox(\"Ativar filtro digital\", value=True)\nnum_filters = int(st.sidebar.number_input(\"Quantidade de filtros\", min_value=1, value=1, step=1))\nnyquist = fs / 2.0\nfc_max = max(2.0, nyquist - 1.0)\nfilter_configs = []\nif digital_enabled:\n    for i in range(num_filters):\n        with st.sidebar.expander(f\"Filtro {i + 1}\", expanded=(i == 0)):\n            tipo = st.selectbox(\n                \"Tipo\",\n                [\"Nenhum\", \"Passa-baixas\", \"Passa-altas\", \"Passa-faixa\", \"Rejeita-faixa\", \"Notch\"],\n                key=f\"tipo_{i}\",\n            )\n            if tipo != \"Nenhum\":\n                familia = (\n                    \"Notch IIR\"\n                    if tipo == \"Notch\"\n                    else st.selectbox(\n                        \"Familia\",\n                        [\"Butterworth\", \"Chebyshev I\", \"Chebyshev II\", \"Eliptico\", \"Bessel\"],\n                        key=f\"fam_{i}\",\n                    )\n                )\n                ordem = 2 if tipo == \"Notch\" else int(st.number_input(\"Ordem\", min_value=1, value=4, step=1, key=f\"ordem_{i}\"))\n                fc1 = st.number_input(\"Fc1 (Hz)\", min_value=1.0, max_value=float(fc_max), value=float(min(max(4 * f_rot, 120.0), fc_max)), step=1.0, key=f\"fc1_{i}\", format=\"%.3f\")\n                fc2 = (\n                    st.number_input(\"Fc2 (Hz)\", min_value=1.0, max_value=float(fc_max), value=float(min(max(8 * f_rot, 300.0), fc_max)), step=1.0, key=f\"fc2_{i}\", format=\"%.3f\")\n                    if tipo in (\"Passa-faixa\", \"Rejeita-faixa\")\n                    else fc1\n                )\n                q_notch = int(st.number_input(\"Fator Q\", min_value=1, value=30, step=1, key=f\"q_{i}\")) if tipo == \"Notch\" else 30\n                filter_configs.append(\n                    {\"tipo\": tipo, \"familia\": familia, \"ordem\": ordem, \"fc1\": fc1, \"fc2\": fc2, \"q_notch\": q_notch}\n                )\n\n\nst.sidebar.header(\"11. Diagnóstico\")\nlimite_bom_rms = st.sidebar.number_input(\n    \"Limiar RMS para Motor BOM (g)\", min_value=0.001, max_value=1.000, value=0.035, step=0.001, format=\"%.3f\"\n)\nlimite_atencao_rms = st.sidebar.number_input(\n    \"Limiar RMS para Atenção (g)\", min_value=0.001, max_value=2.000, value=0.090, step=0.001, format=\"%.3f\"\n)\n\nuploaded = st.sidebar.file_uploader(\"CSV com tempo, ax, ay, az, gx, gy, gz, mx, my, mz\", type=[\"csv\"]) if mode == \"CSV real\" else None\n\nif mode == \"CSV real\" and uploaded is not None:\n    df_csv = pd.read_csv(uploaded)\n    cols = {c.lower().strip(): c for c in df_csv.columns}\n    time_col = cols.get(\"tempo\") or cols.get(\"time\") or cols.get(\"t\")\n    if time_col is not None:\n        t_adc = pd.to_numeric(df_csv[time_col], errors=\"coerce\").to_numpy(float)\n        t_adc = t_adc - t_adc[0]\n        if len(t_adc) > 2:\n            fs = float(1.0 / np.median(np.diff(t_adc)))\n            nyquist = fs / 2.0\n    else:\n        t_adc = np.arange(len(df_csv)) / fs\n\n    def csv_col(name):\n        col = cols.get(name)\n        return pd.to_numeric(df_csv[col], errors=\"coerce\").fillna(0).to_numpy(float) if col else np.zeros(len(df_csv))\n\n    data = {\n        \"acc\": np.vstack([csv_col(\"ax\"), csv_col(\"ay\"), csv_col(\"az\")]),\n        \"gyro\": np.vstack([csv_col(\"gx\"), csv_col(\"gy\"), csv_col(\"gz\")]),\n        \"mag\": np.vstack([csv_col(\"mx\"), csv_col(\"my\"), csv_col(\"mz\")]),\n    }\n    acc_gain_vec = np.array([acc_gain_ax, acc_gain_ay, acc_gain_az], dtype=float).reshape(3, 1)\n    acc_bias_vec_manual = np.array([acc_bias_ax, acc_bias_ay, acc_bias_az], dtype=float).reshape(3, 1)\n    data[\"acc\"] = data[\"acc\"] * acc_gain_vec + acc_bias_vec_manual\n    lsb_acc = lsb_gyro = lsb_mag = np.nan\n    sat_acc = sat_gyro = sat_mag = 0.0\n    t_real = t_adc\nelse:\n    fs_high = fs * oversampling\n    n_high = max(64, int(duration * fs_high))\n    t_high = np.arange(n_high) / fs_high\n    acc, gyro, mag = generate_physical_signals(t_high, fs_high, condition, f_rot, vibration_gain, fault_severity, hf_interference_g)\n\n    if include_gravity:\n        acc = acc.copy()\n        acc[2] += 1.0\n\n    rot = rotation_matrix(roll, pitch, yaw)\n    acc = rot @ acc\n    gyro = rot @ gyro\n    mag = rot @ mag\n\n    # Parametrizacao explicita do acelerometro por eixo.\n    # Ganho Ax/Ay/Az multiplica cada eixo e Bias Ax/Ay/Az desloca o sinal em g antes do ADC.\n    acc_gain_vec = np.array([acc_gain_ax, acc_gain_ay, acc_gain_az], dtype=float).reshape(3, 1)\n    acc_bias_vec_manual = np.array([acc_bias_ax, acc_bias_ay, acc_bias_az], dtype=float).reshape(3, 1)\n    acc = acc * acc_gain_vec + acc_bias_vec_manual\n\n    soft_iron = np.array([[1.08, 0.03, 0.00], [0.02, 0.94, 0.01], [0.00, 0.02, 1.05]])\n    mag = soft_iron @ mag\n\n    temp_delta = temp_c - 25.0\n    acc_bias = np.array([preset[\"acc_bias_xy\"], -0.7 * preset[\"acc_bias_xy\"], preset[\"acc_bias_z\"]]) * bias_gain\n    acc_bias += np.array([0.0005, -0.0003, 0.0002]) * temp_delta\n    gyro_bias = np.array([preset[\"gyro_bias\"], -0.6 * preset[\"gyro_bias\"], 0.4 * preset[\"gyro_bias\"]]) * bias_gain\n    gyro_bias += np.array([0.02, -0.015, 0.01]) * temp_delta\n    mag_bias = np.array([preset[\"mag_bias\"], -0.8 * preset[\"mag_bias\"], 0.5 * preset[\"mag_bias\"]]) * bias_gain\n    mag_bias += np.array([0.03, -0.02, 0.01]) * temp_delta\n\n    acc = apply_sensor_errors(acc, rng, acc_bias, scale_pct, cross_axis_pct, preset[\"acc_noise_density\"], min(dlpf_acc, fs / 2), preset[\"nonlinearity_pct\"])\n    gyro = apply_sensor_errors(gyro, rng, gyro_bias, scale_pct, cross_axis_pct, preset[\"gyro_noise_density\"], min(dlpf_gyro, fs / 2), preset[\"nonlinearity_pct\"])\n    mag = apply_sensor_errors(mag, rng, mag_bias, scale_pct, cross_axis_pct, preset[\"mag_noise_density\"], min(dlpf_mag, fs / 2), preset[\"nonlinearity_pct\"])\n\n    for axis in range(3):\n        acc[axis] = lowpass(acc[axis], fs_high, dlpf_acc, ordem=2)\n        gyro[axis] = lowpass(gyro[axis], fs_high, dlpf_gyro, ordem=2)\n        mag[axis] = lowpass(mag[axis], fs_high, dlpf_mag, ordem=2)\n\n    if aa_enabled:\n        for axis in range(3):\n            acc[axis] = lowpass(acc[axis], fs_high, aa_cutoff, ordem=aa_order, familia=aa_family)\n            gyro[axis] = lowpass(gyro[axis], fs_high, aa_cutoff, ordem=aa_order, familia=aa_family)\n            mag[axis] = lowpass(mag[axis], fs_high, aa_cutoff, ordem=aa_order, familia=aa_family)\n\n    signals_high = [acc[0], acc[1], acc[2], gyro[0], gyro[1], gyro[2], mag[0], mag[1], mag[2]]\n    t_adc, t_real, sampled = resample_with_jitter(t_high, signals_high, fs, jitter_us, dropout_pct, rng)\n\n    acc_x, _, lsb_acc, sat_ax = signed_adc(sampled[0], bits_adc, acc_fs, enob_bits, rng)\n    acc_y, _, _, sat_ay = signed_adc(sampled[1], bits_adc, acc_fs, enob_bits, rng)\n    acc_z, _, _, sat_az = signed_adc(sampled[2], bits_adc, acc_fs, enob_bits, rng)\n    gyro_x, _, lsb_gyro, sat_gx = signed_adc(sampled[3], bits_adc, gyro_fs, enob_bits, rng)\n    gyro_y, _, _, sat_gy = signed_adc(sampled[4], bits_adc, gyro_fs, enob_bits, rng)\n    gyro_z, _, _, sat_gz = signed_adc(sampled[5], bits_adc, gyro_fs, enob_bits, rng)\n    mag_x, _, lsb_mag, sat_mx = signed_adc(sampled[6], bits_adc, mag_fs, enob_bits, rng)\n    mag_y, _, _, sat_my = signed_adc(sampled[7], bits_adc, mag_fs, enob_bits, rng)\n    mag_z, _, _, sat_mz = signed_adc(sampled[8], bits_adc, mag_fs, enob_bits, rng)\n\n    data = {\n        \"acc\": np.vstack([acc_x, acc_y, acc_z]),\n        \"gyro\": np.vstack([gyro_x, gyro_y, gyro_z]),\n        \"mag\": np.vstack([mag_x, mag_y, mag_z]),\n    }\n    sat_acc = max(sat_ax, sat_ay, sat_az)\n    sat_gyro = max(sat_gx, sat_gy, sat_gz)\n    sat_mag = max(sat_mx, sat_my, sat_mz)\n\nbase_signal, unit = select_channel(channel_name, data)\nprocessed_signal = base_signal.copy()\ntrack = [{\"etapa\": \"Saida digital/ADC\", \"sinal\": processed_signal.copy()}]\nif digital_enabled and filter_configs:\n    for idx, filter_config in enumerate(filter_configs):\n        processed_signal = apply_filter(\n            processed_signal,\n            fs,\n            filter_config[\"tipo\"],\n            filter_config[\"familia\"],\n            filter_config[\"ordem\"],\n            filter_config[\"fc1\"],\n            filter_config[\"fc2\"],\n            filter_config[\"q_notch\"],\n        )\n        track.append({\"etapa\": f\"Filtro {idx + 1}: {filter_config['tipo']}\", \"sinal\": processed_signal.copy()})\n\nxf, yf, delta_f = prepare_fft(processed_signal, fs, window_name, zero_padding, detrend_mode)\nharm_df, mags, harmonic_index, thd = harmonic_analysis(xf, yf, f_rot, fs)\nrms, peak, crest, kurt_value, asym = metrics(processed_signal)\nauto_fault, severity, diagnosis_reason = automatic_diagnosis(mags, harmonic_index, thd, kurt_value, crest, channel_name, rms, limite_bom_rms, limite_atencao_rms)\nnum_samples = len(t_adc)\n\ncol1, col2, col3, col4, col5, col6 = st.columns(6)\ncol1.metric(\"1X\", f\"{f_rot:.2f} Hz\")\ncol2.metric(\"Fs\", f\"{fs:.1f} Hz\")\ncol3.metric(\"Nyquist\", f\"{nyquist:.1f} Hz\")\ncol4.metric(\"N\", f\"{num_samples}\")\ncol5.metric(\"Delta f\", f\"{delta_f:.4f} Hz\")\ncol6.metric(\"Severidade\", f\"{severity}%\")\n\nif 5 * f_rot >= nyquist:\n    st.warning(\"A 5a harmonica esta fora ou proxima do limite de Nyquist. Aumente Fs para analisar ate 5X com seguranca.\")\nelif 3 * f_rot >= nyquist:\n    st.warning(\"Harmonicas acima de 3X podem sofrer aliasing.\")\nelse:\n    st.success(\"Amostragem adequada para as principais harmonicas do diagnostico.\")\n\nif not aa_enabled and mode != \"CSV real\" and hf_interference_g > 0:\n    st.warning(\"Anti-aliasing desligado com interferencia acima de Nyquist: espere aliases falsos na banda util.\")\nif max(sat_acc, sat_gyro, sat_mag) > 0:\n    st.error(f\"Saturacao detectada: acc={sat_acc:.2f}%, gyro={sat_gyro:.2f}%, mag={sat_mag:.2f}%.\")\n\nm1, m2, m3, m4, m5 = st.columns(5)\nm1.metric(\"RMS\", f\"{rms:.5f} {unit}\")\nm2.metric(\"Pico\", f\"{peak:.5f} {unit}\")\nm3.metric(\"Fator de crista\", f\"{crest:.2f}\")\nm4.metric(\"Curtose\", f\"{kurt_value:.2f}\")\nm5.metric(\"THD harmonico\", f\"{thd:.2f}\")\n\ntabs = st.tabs([\"Tempo\", \"Espectro FFT\", \"Ordem da máquina\", \"STFT\", \"Envelope\", \"Aquisição\", \"Sensores separados\", \"Resposta em frequência\"])\n\nwith tabs[0]:\n    fig = go.Figure()\n    colors = [\"#64748b\", \"#3b82f6\", \"#a855f7\", \"#ef4444\", \"#4ade80\"]\n    for idx, step in enumerate(track):\n        fig.add_trace(\n            go.Scatter(\n                x=t_adc,\n                y=step[\"sinal\"],\n                mode=\"lines\",\n                name=step[\"etapa\"],\n                line=dict(width=2 if idx == len(track) - 1 else 1, color=colors[idx % len(colors)]),\n                opacity=1 if idx == len(track) - 1 else 0.45,\n            )\n        )\n    fig.update_layout(\n        title=f\"Dominio do tempo - {channel_name}\",\n        template=\"plotly_dark\",\n        height=500,\n        xaxis_title=\"Tempo (s)\",\n        yaxis_title=f\"Amplitude ({unit})\",\n        hovermode=\"x unified\",\n        margin=dict(l=20, r=20, t=60, b=40),\n    )\n    st.plotly_chart(fig, use_container_width=True)\n\nwith tabs[1]:\n    fig = go.Figure()\n    fig.add_trace(go.Scatter(x=xf, y=yf, mode=\"lines\", fill=\"tozeroy\", name=\"FFT\", line=dict(width=2, color=\"#4ade80\")))\n    for n in range(1, 6):\n        fh = n * f_rot\n        if fh < nyquist:\n            fig.add_vline(x=fh, line_dash=\"dash\", line_color=\"rgba(255,255,255,0.45)\", annotation_text=f\"{n}X\")\n    fig.update_layout(\n        title=f\"FFT - {channel_name}\",\n        template=\"plotly_dark\",\n        height=500,\n        xaxis_title=\"Frequencia (Hz)\",\n        yaxis_title=f\"Magnitude ({unit})\",\n        margin=dict(l=20, r=20, t=60, b=40),\n    )\n    fig.update_xaxes(range=[0, min(nyquist, max(12 * f_rot, 150))])\n    st.plotly_chart(fig, use_container_width=True)\n\n    st.subheader(\"Tabela harmonica\")\n    st.dataframe(harm_df, use_container_width=True, hide_index=True)\n    d1, d2 = st.columns([1, 2])\n    d1.metric(\"Hipótese de condição\", auto_fault)\n    d1.metric(\"Índice de severidade\", f\"{severity}%\")\n    d2.info(diagnosis_reason)\n\n    e1 = band_energy(xf, yf, 0, 1.5 * f_rot)\n    e2 = band_energy(xf, yf, 1.5 * f_rot, 5.5 * f_rot)\n    e3 = band_energy(xf, yf, 5.5 * f_rot, nyquist)\n    total = e1 + e2 + e3 + EPS\n    st.subheader(\"Energia por banda\")\n    st.dataframe(\n        pd.DataFrame(\n            {\n                \"Banda\": [\"Baixa ate 1,5X\", \"Harmonica 1,5X a 5,5X\", \"Alta frequencia\"],\n                \"Energia relativa (%)\": [round(100 * e1 / total, 2), round(100 * e2 / total, 2), round(100 * e3 / total, 2)],\n            }\n        ),\n        use_container_width=True,\n        hide_index=True,\n    )\n\n\nwith tabs[2]:\n    st.subheader(\"Order Tracking simples\")\n    st.caption(\n        \"A análise por ordem normaliza o espectro pela rotação da máquina: ordem = frequência / frequência de rotação.\"\n    )\n\n    order_df, orders_axis, order_mag = order_tracking_analysis(xf, yf, f_rot, fs, max_order=10)\n\n    if len(orders_axis) == 0:\n        st.warning(\"Dados insuficientes para análise por ordem.\")\n    else:\n        idx_ordem = (orders_axis >= 0) & (orders_axis <= 10)\n\n        fig_order = go.Figure()\n        fig_order.add_trace(\n            go.Scatter(\n                x=orders_axis[idx_ordem],\n                y=order_mag[idx_ordem],\n                mode=\"lines\",\n                fill=\"tozeroy\",\n                name=\"Espectro por ordem\",\n                line=dict(width=2, color=\"#38bdf8\"),\n            )\n        )\n\n        for ordem in range(1, 11):\n            if ordem * f_rot < nyquist:\n                fig_order.add_vline(\n                    x=ordem,\n                    line_dash=\"dash\",\n                    line_color=\"rgba(255,255,255,0.45)\",\n                    annotation_text=f\"{ordem}X\",\n                )\n\n        fig_order.update_layout(\n            title=f\"Espectro por ordem - rotação = {f_rot:.2f} Hz\",\n            template=\"plotly_dark\",\n            height=500,\n            xaxis_title=\"Ordem da máquina (X)\",\n            yaxis_title=f\"Magnitude ({unit})\",\n            hovermode=\"x unified\",\n            margin=dict(l=20, r=20, t=60, b=40),\n        )\n        fig_order.update_xaxes(range=[0, 10])\n        st.plotly_chart(fig_order, use_container_width=True)\n\n        st.subheader(\"Tabela de ordens\")\n        st.dataframe(order_df, use_container_width=True, hide_index=True)\n\n        st.info(\n            \"Interpretação: 1X elevado sugere componente dominante de rotação; \"\n            \"2X elevado pode indicar desalinhamento; múltiplas ordens superiores podem indicar folga mecânica, \"\n            \"não linearidade, impacto ou ressonância. Combine esta leitura com RMS, curtose, fator de crista, STFT e envelope.\"\n        )\n\n\nwith tabs[3]:\n    if num_samples >= 32:\n        nperseg = min(256, max(32, num_samples // 4))\n        f_stft, t_stft, sxx = spectrogram(\n            processed_signal,\n            fs,\n            window=window_name.split(\" \")[0],\n            nperseg=nperseg,\n            noverlap=nperseg // 2,\n        )\n        fig = go.Figure(\n            data=go.Heatmap(\n                z=10 * np.log10(sxx + EPS),\n                x=t_stft,\n                y=f_stft,\n                colorscale=\"Viridis\",\n                colorbar=dict(title=\"dB\"),\n            )\n        )\n        fig.update_layout(\n            title=\"Espectrograma STFT\",\n            template=\"plotly_dark\",\n            height=520,\n            xaxis_title=\"Tempo (s)\",\n            yaxis_title=\"Frequencia (Hz)\",\n            margin=dict(l=20, r=20, t=60, b=40),\n        )\n        fig.update_yaxes(range=[0, min(nyquist, max(15 * f_rot, 300))])\n        st.plotly_chart(fig, use_container_width=True)\n    else:\n        st.warning(\"Amostras insuficientes para STFT.\")\n\nwith tabs[4]:\n    st.subheader(\"Analise de envelope para impactos e rolamentos\")\n    x_env = processed_signal - np.mean(processed_signal)\n    try:\n        f_low = max(3 * f_rot, 5.0)\n        f_high = min(0.45 * fs, max(f_low + 10.0, 0.4 * fs))\n        if f_high > f_low and f_high < nyquist:\n            b, a = butter(4, [f_low / nyquist, f_high / nyquist], btype=\"bandpass\")\n            x_bp = filtfilt(b, a, x_env)\n        else:\n            x_bp = x_env\n        envelope = np.abs(hilbert(x_bp))\n        xf_env, yf_env, _ = prepare_fft(envelope, fs, window_name, zero_padding, \"Constante\")\n        fig = go.Figure()\n        fig.add_trace(\n            go.Scatter(\n                x=xf_env,\n                y=yf_env,\n                mode=\"lines\",\n                fill=\"tozeroy\",\n                line=dict(color=\"#eab308\", width=2),\n                name=\"FFT do envelope\",\n            )\n        )\n        for n in range(1, 6):\n            fh = n * f_rot\n            if fh < nyquist:\n                fig.add_vline(x=fh, line_dash=\"dash\", line_color=\"rgba(255,255,255,0.45)\", annotation_text=f\"{n}X\")\n        fig.update_layout(\n            title=\"Espectro do envelope\",\n            template=\"plotly_dark\",\n            height=500,\n            xaxis_title=\"Frequencia (Hz)\",\n            yaxis_title=\"Magnitude\",\n            margin=dict(l=20, r=20, t=60, b=40),\n        )\n        fig.update_xaxes(range=[0, min(nyquist, max(12 * f_rot, 150))])\n        st.plotly_chart(fig, use_container_width=True)\n        st.caption(\"O envelope evidencia modulacoes de impactos que podem aparecer em falhas de rolamento.\")\n    except Exception as exc:\n        st.warning(f\"Nao foi possivel calcular o envelope: {exc}\")\n\nwith tabs[5]:\n    st.subheader(\"Resumo de aquisicao\")\n    chain_df = pd.DataFrame(\n        {\n            \"Etapa\": [\"Fenomeno fisico\", \"Sensor MEMS\", \"DLPF interno\", \"Anti-aliasing\", \"Amostragem\", \"ADC\", \"DSP\"],\n            \"Implementacao\": [\n                \"Vibracao, rotacao e campo magnetico simulados pela condicao da maquina\",\n                f\"Acelerometro: faixa +/-{acc_fs} g, ganhos=({acc_gain_ax:.3f}, {acc_gain_ay:.3f}, {acc_gain_az:.3f}), bias=({acc_bias_ax:.4f}, {acc_bias_ay:.4f}, {acc_bias_az:.4f}) g; demais: escala, cross-axis, ruido, hard/soft iron e temperatura\",\n                f\"acc={dlpf_acc} Hz, gyro={dlpf_gyro} Hz, mag={dlpf_mag} Hz\",\n                f\"{aa_family}, ordem {aa_order}, fc={aa_cutoff:.1f} Hz\" if aa_enabled else \"Desativado\",\n                f\"Fs={fs:.1f} Hz, jitter={jitter_us:.1f} us, perda={dropout_pct:.1f}%\",\n                f\"{bits_adc} bits, ENOB={enob_bits:.1f}, LSB acc={lsb_acc:.6g} g, gyro={lsb_gyro:.6g} graus/s, mag={lsb_mag:.6g} uT\",\n                \"Filtros digitais, FFT, STFT, envelope, harmonicas, energia por banda e diagnostico\",\n            ],\n        }\n    )\n    st.dataframe(chain_df, use_container_width=True, hide_index=True)\n    s1, s2, s3 = st.columns(3)\n    s1.metric(\"Saturacao acc\", f\"{sat_acc:.2f}%\")\n    s2.metric(\"Saturacao gyro\", f\"{sat_gyro:.2f}%\")\n    s3.metric(\"Saturacao mag\", f\"{sat_mag:.2f}%\")\n\nwith tabs[6]:\n    fig = sp.make_subplots(\n        rows=3,\n        cols=1,\n        shared_xaxes=True,\n        vertical_spacing=0.08,\n        subplot_titles=(\"Acelerometro (g)\", \"Giroscopio (graus/s)\", \"Magnetometro (uT)\"),\n    )\n    for axis, name in enumerate([\"Ax\", \"Ay\", \"Az\"]):\n        fig.add_trace(go.Scatter(x=t_adc, y=data[\"acc\"][axis], name=name, mode=\"lines\"), row=1, col=1)\n    for axis, name in enumerate([\"Gx\", \"Gy\", \"Gz\"]):\n        fig.add_trace(go.Scatter(x=t_adc, y=data[\"gyro\"][axis], name=name, mode=\"lines\"), row=2, col=1)\n    for axis, name in enumerate([\"Mx\", \"My\", \"Mz\"]):\n        fig.add_trace(go.Scatter(x=t_adc, y=data[\"mag\"][axis], name=name, mode=\"lines\"), row=3, col=1)\n    fig.update_layout(template=\"plotly_dark\", height=780, hovermode=\"x unified\", margin=dict(l=20, r=20, t=70, b=40))\n    fig.update_xaxes(title_text=\"Tempo (s)\", row=3, col=1)\n    st.plotly_chart(fig, use_container_width=True)\n\nwith tabs[7]:\n    if digital_enabled and filter_configs:\n        points = 2048\n        w_total = np.linspace(0, fs / 2.0, points)\n        h_total = np.ones(points, dtype=complex)\n        valid = 0\n        for filter_config in filter_configs:\n            if filter_config[\"tipo\"] != \"Nenhum\":\n                b, a = design_filter(\n                    fs,\n                    filter_config[\"tipo\"],\n                    filter_config[\"familia\"],\n                    filter_config[\"ordem\"],\n                    filter_config[\"fc1\"],\n                    filter_config[\"fc2\"],\n                    filter_config[\"q_notch\"],\n                )\n                try:\n                    _, h = freqz(b, a, worN=w_total, fs=fs)\n                    h_total *= h\n                    valid += 1\n                except Exception:\n                    pass\n        if valid:\n            fig = sp.make_subplots(\n                rows=2,\n                cols=1,\n                shared_xaxes=True,\n                vertical_spacing=0.08,\n                subplot_titles=(\"Magnitude |H(f)|\", \"Fase H(f)\"),\n            )\n            fig.add_trace(\n                go.Scatter(x=w_total, y=20 * np.log10(np.abs(h_total) + EPS), mode=\"lines\", line=dict(color=\"#3b82f6\", width=2)),\n                row=1,\n                col=1,\n            )\n            fig.add_hline(y=-3, line_dash=\"dash\", line_color=\"red\", annotation_text=\"-3 dB\", row=1, col=1)\n            fig.add_trace(\n                go.Scatter(x=w_total, y=np.unwrap(np.angle(h_total)) * 180 / np.pi, mode=\"lines\", line=dict(color=\"#a855f7\", width=2)),\n                row=2,\n                col=1,\n            )\n            fig.update_layout(template=\"plotly_dark\", height=620, showlegend=False, hovermode=\"x unified\")\n            fig.update_xaxes(title_text=\"Frequencia (Hz)\", row=2, col=1)\n            st.plotly_chart(fig, use_container_width=True)\n            st.caption(\"O Bode representa o filtro causal projetado. Quando filtfilt e usado, a fase efetiva tende a zero.\")\n        else:\n            st.info(\"Nenhum filtro valido.\")\n    else:\n        st.info(\"Ative o filtro para visualizar o Bode.\")\n";
+      try {
+        stlite.mount(
+          {
+            requirements: ["numpy", "scipy", "plotly", "pandas"],
+            entrypoint: "app.py",
+            files: { "app.py": appSource },
+          },
+          document.getElementById("root")
+        );
+      } catch (error) {
+        document.getElementById("root").innerHTML = `
+          <div class="error">
+            <strong>Falha ao iniciar o módulo.</strong>
+            <span>Confira se há internet para carregar stlite e os pacotes Python na primeira execução.</span>
+            <span>${error.message}</span>
+          </div>
+        `;
+      }
+    </script>
+  </body>
+</html>
